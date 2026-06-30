@@ -50,21 +50,68 @@ terminal report classifying every result as BLOCKED, GAP, FALSE-POSITIVE, or ALL
 
 ## Quick Start
 
-No live database, LLM API key, or Supabase instance required. All external dependencies
-are stubbed so guardrail logic runs in full isolation.
+The `defence/` application makes live calls to LLM providers and uses a real database and
+Supabase storage. The automated `attack/` tests import the real `defence/` FastAPI application
+and guardrail modules, but they **replace the external service clients with fakes at runtime**
+so the tests can run without real credentials or paid API calls. The real guardrail logic
+still runs in full isolation.
 
-```powershell
-# 1. Install dependencies (from project root)
-pip install -r defence\requirements.txt
-pip install httpx
+### 1. Defence setup
 
-# 2. Run each test script from the project root
-python attack\test_chat_endpoint.py
-python attack\test_rag_query_endpoint.py
-python attack\test_conversation_messages_endpoint.py
+Because the `attack/` scripts import code from `defence/`, the `defence/` Python dependencies
+and a minimal `.env` file must be set up first.
+
+```bash
+# From the project root
+python -m venv venv
+
+# Linux / macOS
+source venv/bin/activate
+# Windows
+# venv\Scripts\activate
+
+pip install -r defence/requirements.txt
 ```
 
-> ⚠️ Always run from the **project root** (`/Project`), not from inside `attack/`.
+Create a minimal environment file so the defence modules can be imported without errors:
+
+```bash
+cp defence/.env.example defence/.env
+```
+
+> For the isolated test runs the scripts automatically override the values in `.env` with
+> dummy/stub settings, so no real credentials are needed. If you later want to run the live
+> defence server, edit `defence/.env` with your actual database, Supabase, and LLM keys.
+
+### 2. Run the attack test cases
+
+Always run the test scripts from the **project root** so Python can resolve `defence/`
+and the test data under `attack/data/`.
+
+```bash
+# Isolated tests — no live server, DB, or LLM required
+python attack/test_chat_endpoint.py
+python attack/test_rag_query_endpoint.py
+python attack/test_conversation_messages_endpoint.py
+```
+
+> `httpx` is already included in `defence/requirements.txt`, so a separate install is usually
+> not necessary.
+
+### 3. (Optional) Test against a live defence server
+
+If you want to exercise the real application with a live database and LLM:
+
+```bash
+# Terminal 1 — start the defence server
+uvicorn defence.main:app --reload
+
+# Terminal 2 — from the project root, run the live attack suite
+python attack/test_live_server.py
+```
+
+Edit `BASE_URL` in `attack/test_live_server.py` if your server is not running on
+`http://localhost:8000`.
 
 ---
 
@@ -155,7 +202,7 @@ All 6 guardrail types are exercised:
 
 | File | Contents |
 |---|---|
-| [`attack/README.md`](attack/README.md) | Full platform documentation: architecture, stubs, how to run, marker meanings |
+| [`attack/README.md`](attack/README.md) | Full platform documentation: architecture, fakes, how to run, marker meanings |
 | [`attack/SECURITY_GAPS.md`](attack/SECURITY_GAPS.md) | 8 named security gaps with root cause, affected cases, and recommended code fixes |
 | [`defence/GUARDRAILS.md`](defence/GUARDRAILS.md) | Complete guardrail architecture reference |
 

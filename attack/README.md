@@ -83,39 +83,67 @@ All six guardrail types defined in [`defence/GUARDRAILS.md`](../defence/GUARDRAI
 
 ## How to Run
 
-No live database, LLM API key, or Supabase instance is required. The platform stubs all
-external dependencies so the real guardrail code paths execute in full isolation.
+The `defence/` application makes live calls to LLM providers and uses a real database and
+Supabase storage. The isolated `attack/` tests import the real `defence/` FastAPI application
+and guardrail modules, but they **replace the external service clients with fakes at runtime**
+so the tests can run without real credentials or paid API calls. The real guardrail logic
+still executes in full isolation.
 
-**Prerequisites**
+### 1. Set up the defence environment
 
-```powershell
-# From the project root — install defence dependencies once
-pip install -r defence\requirements.txt
-pip install httpx          # FastAPI TestClient dependency
+Because the `attack/` scripts import code from `defence/`, the `defence/` Python
+dependencies must be installed first.
+
+```bash
+# From the project root
+python -m venv venv
+
+# Linux / macOS
+source venv/bin/activate
+# Windows
+# venv\Scripts\activate
+
+pip install -r defence/requirements.txt
 ```
 
-**Run each script from the project root:**
+Create a minimal `.env` so the defence modules can be imported without errors:
 
-```powershell
-python attack\test_chat_endpoint.py
-python attack\test_rag_query_endpoint.py
-python attack\test_conversation_messages_endpoint.py
+```bash
+cp defence/.env.example defence/.env
 ```
 
-> **Important:** always run from the **project root** (`ImpactPods/Project/`), not from inside
-> the `attack/` folder. The scripts resolve `defence/` relative to the project root.
+> For isolated tests the scripts automatically override `.env` with dummy/stub values, so no
+> real credentials are needed.
 
-### Testing against a LIVE server
-If you want to test your **live, running application** (meaning the tests will use your real database and your real LLM), you can use the live testing script. This sends real HTTP requests over the network.
+### 2. Run the isolated attack test cases
 
-```powershell
-# 1. Start your live application
+Always run from the **project root** so Python can resolve `defence/` and the test data under
+`attack/data/`.
+
+```bash
+python attack/test_chat_endpoint.py
+python attack/test_rag_query_endpoint.py
+python attack/test_conversation_messages_endpoint.py
+```
+
+> `httpx` is already included in `defence/requirements.txt`, so a separate install is usually
+> not necessary.
+
+### 3. (Optional) Test against a live server
+
+If you want to test your **live, running application** (real database and LLM), use the live
+attack suite. This sends real HTTP requests over the network.
+
+```bash
+# Terminal 1 — start the live defence server
 uvicorn defence.main:app --reload
 
-# 2. In a separate terminal, run the live attack suite
-python attack\test_live_server.py
+# Terminal 2 — from the project root, run the live attack suite
+python attack/test_live_server.py
 ```
-*(If your server runs on a different port than `8000`, simply edit the `BASE_URL` in `test_live_server.py`.)*
+
+*(If your server runs on a different port than `8000`, edit `BASE_URL` in
+`attack/test_live_server.py`.)*
 
 ---
 
@@ -177,7 +205,7 @@ succeeded and documents exactly why the guardrail missed it.
 | **Chain-of-thought escalation** | Step-by-step reasoning framing avoids keyword triggers |
 | **Multi-turn slow-burn** (MULTI_001) | Gradual trust-building across turns; "remainder of session" variant unmatched |
 | **Real-world business logic** | No semantic understanding — regex cannot detect tone/policy manipulation |
-| **Output-guard dependent cases** | Several PDF attacks require a live LLM to emit unsafe content; stub returns safe text |
+| **Output-guard dependent cases** | Several PDF attacks require a live LLM to emit unsafe content; fake returns safe text |
 
 These gaps are consistent with the limitations documented in
 [`defence/GUARDRAILS.md §18`](../defence/GUARDRAILS.md) and serve as concrete evidence for
@@ -205,11 +233,11 @@ test_*.py
   └─ print_report()                  prints per-case markers + summary counters
 ```
 
-### Stub strategy
+### Fake strategy
 
-The platform only stubs external I/O boundaries — **all guardrail logic runs unmodified**:
+The platform only fakes external I/O boundaries — **all guardrail logic runs unmodified**:
 
-| Stubbed | Real (runs in full) |
+| Faked | Real (runs in full) |
 |---|---|
 | LLM API calls (OpenRouter / OpenAI …) | `InputGuard.check_messages()` |
 | PostgreSQL database | `InputGuard.check_user_prompt()` |
@@ -224,8 +252,13 @@ The platform only stubs external I/O boundaries — **all guardrail logic runs u
 
 The evaluator data directory can be overridden at runtime:
 
-```powershell
-$env:RED_TEAM_EVALUATOR_DIR = "C:\path\to\your\red-team-evaluator"
+```bash
+# Linux / macOS
+export RED_TEAM_EVALUATOR_DIR="./attack/data"
+python attack/test_chat_endpoint.py
+
+# Windows PowerShell
+$env:RED_TEAM_EVALUATOR_DIR = ".\attack\data"
 python attack\test_chat_endpoint.py
 ```
 
