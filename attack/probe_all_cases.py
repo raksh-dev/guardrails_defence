@@ -4,6 +4,11 @@ Probe ALL evaluator cases directly against the guardrail pattern scanner
 Prints which attacks slip through InputGuard and DocumentGuard.
 """
 import sys, os, json
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFENCE_ROOT = PROJECT_ROOT / "defence"
+DATA_DIR = Path(__file__).resolve().parent / "data"
 
 os.environ.update({
     "DATABASE_URL": "postgresql://user:pass@localhost:5432/test",
@@ -16,19 +21,17 @@ os.environ.update({
     "GUARDRAILS_ENABLED": "true",
 })
 
-sys.path.insert(0, r"C:\Users\yepur\Desktop\ImpactPods\Project\defence")
+sys.path.insert(0, str(DEFENCE_ROOT))
 
 import warnings
 warnings.filterwarnings("ignore")
 
 from services.guardrails.patterns import scan_input, scan_document
 
-DATA_DIR = r"C:\Users\yepur\Desktop\ImpactPods\Neeraj_PS2\red-team-evaluator\data"
-
-with open(os.path.join(DATA_DIR, "adversarial_prompts.json"), encoding="utf-8") as f:
+with open(DATA_DIR / "adversarial_prompts.json", encoding="utf-8") as f:
     adv = json.load(f)
 
-with open(os.path.join(DATA_DIR, "pdf_adversarial_prompts.json"), encoding="utf-8") as f:
+with open(DATA_DIR / "pdf_adversarial_prompts.json", encoding="utf-8") as f:
     pdf = json.load(f)
 
 all_cases = adv + pdf
