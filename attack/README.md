@@ -83,11 +83,13 @@ All six guardrail types defined in [`defence/GUARDRAILS.md`](../defence/GUARDRAI
 
 ## How to Run
 
-The `defence/` application makes live calls to LLM providers and uses a real database and
-Supabase storage. The isolated `attack/` tests import the real `defence/` FastAPI application
-and guardrail modules, but they **replace the external service clients with fakes at runtime**
-so the tests can run without real credentials or paid API calls. The real guardrail logic
-still executes in full isolation.
+The `attack/` tests import the real `defence/` FastAPI application and guardrail modules.
+They can run in two modes:
+
+| Mode | External services | Credentials needed | Use case |
+|---|---|---|---|
+| **Fake** (default) | LLM, DB, vector store, and storage are faked | None | Fast, deterministic, free input-guard tests |
+| **Real** (`attack/config.json` → `use_real_services: true`) | Real defence services are used | Valid `defence/.env` with real LLM, DB, and storage keys | End-to-end validation against the real stack |
 
 ### 1. Set up the defence environment
 
@@ -106,19 +108,19 @@ source venv/bin/activate
 pip install -r defence/requirements.txt
 ```
 
-Create a minimal `.env` so the defence modules can be imported without errors:
+Create a minimal `.env`:
 
 ```bash
 cp defence/.env.example defence/.env
 ```
 
-> For isolated tests the scripts automatically override `.env` with dummy/stub values, so no
-> real credentials are needed.
+> For **fake** mode the scripts automatically override `.env` with dummy values, so no real
+> credentials are needed. For **real** mode, fill in `defence/.env` with your actual database,
+> Supabase, and LLM credentials.
 
-### 2. Run the isolated attack test cases
+### 2. Fake mode (default)
 
-Always run from the **project root** so Python can resolve `defence/` and the test data under
-`attack/data/`.
+Run the isolated tests with no live services:
 
 ```bash
 python attack/test_chat_endpoint.py
@@ -129,10 +131,46 @@ python attack/test_conversation_messages_endpoint.py
 > `httpx` is already included in `defence/requirements.txt`, so a separate install is usually
 > not necessary.
 
-### 3. (Optional) Test against a live server
+### 3. Real-services mode
 
-If you want to test your **live, running application** (real database and LLM), use the live
-attack suite. This sends real HTTP requests over the network.
+Edit `attack/config.json` and set `use_real_services` to `true` so the tests use the real
+defence LLM, DB, vector store, and storage instead of the test fakes. The `defence/.env`
+must contain valid credentials and the Supabase/database endpoints must be reachable.
+
+```json
+{
+  "use_real_services": true
+}
+```
+
+Then run the tests with your real credentials loaded:
+
+```bash
+# Linux / macOS — source defence/.env so the real values are in the environment
+export $(cat defence/.env | xargs)
+python attack/test_chat_endpoint.py
+python attack/test_rag_query_endpoint.py
+python attack/test_conversation_messages_endpoint.py
+
+# Windows PowerShell
+$env:USE_REAL_SERVICES = "true"   # optional override; config.json is the default
+$env:LLM_API_KEY = "..."
+$env:DATABASE_URL = "..."
+python attack\test_chat_endpoint.py
+```
+
+> The `USE_REAL_SERVICES` environment variable can still override `attack/config.json` when
+> needed (e.g., in CI/CD).
+
+> **Current limitation:** the output-guard and RAG tests were designed around the fake LLM and
+> fake vector store. In real mode they will need to be redesigned (e.g., real RAG requires a
+> book with an uploaded PDF and completed ingestion). The input-guard and conversation-history
+> tests will run against the real stack.
+
+### 4. (Optional) Test against a live server
+
+If you want to test your **live, running application** over the network, use the live attack
+suite.
 
 ```bash
 # Terminal 1 — start the live defence server

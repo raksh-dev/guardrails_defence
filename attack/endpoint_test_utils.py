@@ -6,11 +6,22 @@ Shared utilities for the adversarial prompt test platform.
 Responsibilities
 ----------------
 bootstrap_defence_app()
-    Sets minimal stub environment variables, inserts ``defence/`` onto sys.path,
-    and imports ``defence/main.py`` — returning the real FastAPI application with
-    all guardrail middleware active but no live external services.
+    Sets minimal stub environment variables (unless ``USE_REAL_SERVICES=true``),
+    inserts ``defence/`` onto sys.path, and imports ``defence/main.py`` —
+    returning the real FastAPI application with all guardrail middleware active.
 
-Fake / stub classes
+attack/config.json
+    Primary configuration file for the test platform. Set ``use_real_services``
+    to ``true`` here to run against real defence services. Can be overridden via
+    the ``USE_REAL_SERVICES`` environment variable.
+
+USE_REAL_SERVICES
+    Runtime toggle. When ``false`` (default), the test platform uses the fakes
+    below so no live external services are needed. When ``true``, the real
+    defence services are used (LLM, DB, vector store, storage) and a valid
+    ``defence/.env`` with real credentials is required.
+
+Fake / stub classes (used only when USE_REAL_SERVICES=false)
     ``FakeLLMProvider``         — returns a fixed string instead of calling an LLM API.
     ``FakeVectorStore``         — returns in-memory FakeDocument objects instead of pgvector.
     ``FakeRAGSession``          — satisfies SQLModel session type checks without a DB.
@@ -18,9 +29,10 @@ Fake / stub classes
     ``FakeContextManager``      — builds context from the in-memory store.
 
 install_*() helpers
-    Patch the defence router/service modules at runtime to use the fakes above,
-    so guardrail logic (InputGuard, DocumentGuard, OutputGuard, ToolGuard) runs
-    in full but no network calls are made.
+    No-ops when ``USE_REAL_SERVICES=true``. Otherwise they patch the defence
+    router/service modules at runtime to use the fakes above, so guardrail logic
+    (InputGuard, DocumentGuard, OutputGuard, ToolGuard) runs in full but no
+    network calls are made.
 
 load_all_evaluator_cases(file_name)
     Reads every case from the red-team-evaluator data directory.  The directory
@@ -33,6 +45,7 @@ EndpointCase / assert_response / print_report
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -45,6 +58,32 @@ from typing import Any, Callable
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFENCE_ROOT = PROJECT_ROOT / "defence"
 DEFAULT_EVALUATOR_DIR = Path(__file__).resolve().parent
+ATTACK_CONFIG_PATH = DEFAULT_EVALUATOR_DIR / "config.json"
+
+
+def _load_attack_config() -> dict:
+    """Load attack test platform configuration from attack/config.json."""
+    if not ATTACK_CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(ATTACK_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+_ATTACK_CONFIG = _load_attack_config()
+
+# Set use_real_services to true in attack/config.json (or USE_REAL_SERVICES=true in the
+# environment) to run against real defence services (real LLM, DB, vector store, storage).
+# Requires a valid defence/.env with real credentials.
+USE_REAL_SERVICES = os.environ.get(
+    "USE_REAL_SERVICES", str(_ATTACK_CONFIG.get("use_real_services", False))
+).lower() in ("true", "1", "yes")
+
+
+def is_real_services_mode() -> bool:
+    """Return True when the test platform is using real defence services."""
+    return USE_REAL_SERVICES
 
 
 def bootstrap_defence_app():
@@ -60,9 +99,14 @@ def bootstrap_defence_app():
         "GUARDRAILS_ENABLED": "true",
         "GUARDRAILS_DEBUG": "false",
     }
-    for key, value in env_defaults.items():
-        os.environ[key] = value
-    os.environ["DEBUG"] = "false"
+    if not USE_REAL_SERVICES:
+        for key, value in env_defaults.items():
+            os.environ[key] = value
+        os.environ["DEBUG"] = "false"
+    else:
+        # Real mode: trust the user's environment / defence/.env. Only set DEBUG
+        # if it is absent so the app doesn't crash.
+        os.environ.setdefault("DEBUG", "false")
 
     defence_path = str(DEFENCE_ROOT)
     if defence_path not in sys.path:
@@ -114,6 +158,8 @@ class FakeLLMProvider:
 
 
 def install_chat_stub(module: Any, output: str) -> None:
+    if USE_REAL_SERVICES:
+        return
     from services.chat_service import ChatService
 
     module.build_chat_service = lambda **kwargs: ChatService(FakeLLMProvider(output))
@@ -168,6 +214,8 @@ class FakeRAGSession:
 
 
 def install_rag_service_override(app, output: str, documents: list[FakeDocument]) -> None:
+    if USE_REAL_SERVICES:
+        return
     import routers.rag as rag_router
     import services.rag.rag_service as rag_service_module
     from services.rag.rag_service import RAGService
@@ -284,7 +332,9 @@ class FakeContextManager:
         return None
 
 
-def install_conversation_overrides(app, output: str) -> InMemoryConversationStore:
+def install_conversation_overrides(app, output: str) -> InMemoryConversationStore | None:
+    if USE_REAL_SERVICES:
+        return None
     import routers.conversation as conversation_router
 
     store = InMemoryConversationStore()
@@ -341,6 +391,9 @@ class EndpointCase:
     # Human-readable note shown in the report
     gap_note: str | None = None
     setup: Callable[[], None] | None = None
+    # Set True for cases that require fake LLM/DB responses and cannot run
+    # against real defence services without redesign.
+    skip_in_real_mode: bool = False
 
 
 def assert_response(case: EndpointCase, response) -> tuple[bool, str]:
@@ -366,16 +419,17 @@ def assert_response(case: EndpointCase, response) -> tuple[bool, str]:
 
 def print_report(script_name: str, endpoint: str, rows: list[dict[str, Any]]) -> int:
     total = len(rows)
+    skipped = sum(1 for r in rows if r.get("skipped"))
     # "passed" in test terms: the response matched what we expected
-    passed = sum(1 for r in rows if r["passed"])
-    failed = total - passed
+    passed = sum(1 for r in rows if r["passed"] and not r.get("skipped"))
+    failed = total - passed - skipped
 
     # Semantic breakdown
-    blocked_attacks = sum(1 for r in rows if r["passed"] and r.get("is_attack") and r.get("was_blocked"))
-    slipped_attacks  = sum(1 for r in rows if r["passed"] and r.get("is_attack") and not r.get("was_blocked"))
-    false_positives  = sum(1 for r in rows if r["passed"] and not r.get("is_attack") and r.get("was_blocked"))
-    true_negatives   = sum(1 for r in rows if r["passed"] and not r.get("is_attack") and not r.get("was_blocked"))
-    test_failures    = sum(1 for r in rows if not r["passed"])
+    blocked_attacks = sum(1 for r in rows if r["passed"] and not r.get("skipped") and r.get("is_attack") and r.get("was_blocked"))
+    slipped_attacks  = sum(1 for r in rows if r["passed"] and not r.get("skipped") and r.get("is_attack") and not r.get("was_blocked"))
+    false_positives  = sum(1 for r in rows if r["passed"] and not r.get("skipped") and not r.get("is_attack") and r.get("was_blocked"))
+    true_negatives   = sum(1 for r in rows if r["passed"] and not r.get("skipped") and not r.get("is_attack") and not r.get("was_blocked"))
+    test_failures    = sum(1 for r in rows if not r["passed"] and not r.get("skipped"))
 
     print()
     print("=" * 80)
@@ -384,7 +438,9 @@ def print_report(script_name: str, endpoint: str, rows: list[dict[str, Any]]) ->
     print("=" * 80)
 
     for row in rows:
-        if not row["passed"]:
+        if row.get("skipped"):
+            marker = "SKIPPED  "      # requires fakes; cannot run against real services
+        elif not row["passed"]:
             marker = "TEST-FAIL"      # test harness itself is broken
         elif row.get("is_attack") and not row.get("was_blocked"):
             marker = "GAP      "      # attack slipped through — security gap
@@ -402,6 +458,7 @@ def print_report(script_name: str, endpoint: str, rows: list[dict[str, Any]]) ->
     print()
     print("-" * 80)
     print(f"Total test cases      : {total}")
+    print(f"  Skipped (need fakes): {skipped}")
     print(f"  Attacks BLOCKED     : {blocked_attacks}   <- guardrail working")
     print(f"  Attacks SLIPPED     : {slipped_attacks}   <- SECURITY GAPS IDENTIFIED")
     print(f"  Benign TRUE-NEG     : {true_negatives}   <- correctly allowed")

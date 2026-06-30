@@ -20,6 +20,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 from endpoint_test_utils import (
+    USE_REAL_SERVICES,
     EndpointCase,
     assert_response,
     bootstrap_defence_app,
@@ -96,7 +97,7 @@ def build_cases() -> list[EndpointCase]:
             expected_guardrail="CONVERSATION_HISTORY_GUARD",
             expected_reason="CONTEXT_POISONING",
         ),
-        # ── Output guard (stubbed unsafe LLM output) ─────────────────────────
+        # ── Output guard (requires fake unsafe LLM output) ───────────────────
         EndpointCase(
             case_id="CHAT_OUTPUT_001",
             name="unsafe model output is blocked by OutputGuard",
@@ -106,6 +107,7 @@ def build_cases() -> list[EndpointCase]:
             expected_guardrail="OUTPUT_GUARD",
             expected_reason="SYSTEM_PROMPT_LEAK",
             setup=lambda: install_chat_stub(chat_router, UNSAFE_OUTPUT),
+            skip_in_real_mode=True,
         ),
     ]
 
@@ -159,6 +161,19 @@ def run() -> int:
 
     rows = []
     for case in build_cases():
+        if USE_REAL_SERVICES and case.skip_in_real_mode:
+            rows.append({
+                "case_id":    case.case_id,
+                "name":       case.name,
+                "passed":     True,
+                "skipped":    True,
+                "details":    "skipped in real-services mode",
+                "gap_note":   case.gap_note,
+                "is_attack":  True,
+                "was_blocked": False,
+            })
+            continue
+
         install_chat_stub(chat_router, SAFE_OUTPUT)
         if case.setup:
             case.setup()

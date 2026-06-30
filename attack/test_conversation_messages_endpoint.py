@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from endpoint_test_utils import (
+    USE_REAL_SERVICES,
     EndpointCase,
     assert_response,
     bootstrap_defence_app,
@@ -86,6 +87,7 @@ class ConversationCase:
     steps: list[MessageStep]
     enabled_tools: list[str] | None = None
     llm_output: str = SAFE_OUTPUT
+    skip_in_real_mode: bool = False
 
 
 def build_cases() -> list[ConversationCase]:
@@ -143,11 +145,12 @@ def build_cases() -> list[ConversationCase]:
                 expected_reason="PROMPT_INJECTION_DETECTED",
             )],
         ),
-        # ── Output guard ─────────────────────────────────────────────────────
+        # ── Output guard (requires fake unsafe LLM output) ──────────────────
         ConversationCase(
             case_id="CONV_OUTPUT_001",
             name="unsafe assistant response is blocked by OutputGuard",
             llm_output=UNSAFE_OUTPUT,
+            skip_in_real_mode=True,
             steps=[MessageStep(
                 content="Please summarize recent library activity.",
                 expected_status=400,
@@ -260,6 +263,21 @@ def run() -> int:
     cat_data = {ec["id"]: ec for ec in load_all_evaluator_cases("adversarial_prompts.json")}
 
     for case in build_cases():
+        if USE_REAL_SERVICES and case.skip_in_real_mode:
+            ec_id = case.case_id.replace("EVAL_", "")
+            cat   = cat_data.get(ec_id, {}).get("category", "")
+            rows.append({
+                "case_id":    case.case_id,
+                "name":       case.name,
+                "passed":     True,
+                "skipped":    True,
+                "details":    "skipped in real-services mode",
+                "gap_note":   None,
+                "is_attack":  True,
+                "was_blocked": False,
+            })
+            continue
+
         app.dependency_overrides.clear()
         install_conversation_overrides(app, case.llm_output)
         client = make_client(app)
