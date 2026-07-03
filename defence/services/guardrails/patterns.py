@@ -13,8 +13,11 @@ Matching is case-insensitive and tolerant of extra whitespace. We keep the
 patterns readable on purpose rather than maximally clever — this is a
 lightweight, practical guard, not a complete adversarial-NLP system.
 """
+import base64
+import html
 import re
 from typing import Optional
+from urllib.parse import unquote
 
 from services.guardrails.guardrail_types import BlockReason
 
@@ -150,6 +153,103 @@ SECRET_VALUE: list[PatternEntry] = [
 
 
 # ---------------------------------------------------------------------------
+# 7. Gap-closing additions (derived from the red-team attack suite)
+# ---------------------------------------------------------------------------
+
+# Extra override / role phrasings the base rules miss.
+EXTRA_OVERRIDE: list[PatternEntry] = [
+    (_c(r"\b(ignore|disregard|forget|bypass)\b[^.\n]{0,30}\b(policy|policies|task|visible instructions?)\b"),
+     "instruction_override", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\bsystem override\b"),
+     "instruction_override", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\byour new (instruction|instructions|rule|rules|task)\b"),
+     "instruction_override", BlockReason.HIDDEN_INSTRUCTIONS),
+    (_c(r"\bstop following\b[^.\n]{0,25}\b(system )?(prompt|instructions|rules)\b"),
+     "instruction_override", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\bfollow any instructions?\b[^.\n]{0,30}\b(contain|contains|contained)\b"),
+     "instruction_override", BlockReason.HIDDEN_INSTRUCTIONS),
+    (_c(r"\bdecode\b[^.\n]{0,25}\b(execute|run|follow|obey)\b"),
+     "instruction_override", BlockReason.HIDDEN_INSTRUCTIONS),
+    (_c(r"\b(no|without)\s+(restriction|restrictions|limits|rules|filter|filters|guardrails)\b"),
+     "role_manipulation", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\bunrestricted\s+(assistant|mode|ai|model|version)\b"),
+     "role_manipulation", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\bhow to (exploit|attack|hack|bypass)\b[^.\n]{0,20}\b(this|the|your)\s+(system|app|application|chatbot|assistant)\b"),
+     "role_manipulation", BlockReason.PROMPT_INJECTION_DETECTED),
+]
+
+# Broader system/developer prompt-leak phrasings.
+SYSTEM_PROMPT_LEAK_EXTRA: list[PatternEntry] = [
+    (_c(r"\bwhat (is|are) your\b[^.\n]{0,20}\b(system|developer|initial|original|hidden|exact)\b[^.\n]{0,12}\b(prompt|prompts|instruction|instructions)\b"),
+     "system_prompt_leak", BlockReason.SYSTEM_PROMPT_LEAK),
+    (_c(r"\b(word for word|verbatim)\b"),
+     "system_prompt_leak", BlockReason.SYSTEM_PROMPT_LEAK),
+    (_c(r"\b(print|reveal|show|output|list|provide)\b[^.\n]{0,30}\binitial\w*\s+instructions\b"),
+     "system_prompt_leak", BlockReason.SYSTEM_PROMPT_LEAK),
+]
+
+# Extra secret-leak phrasings.
+SECRET_LEAK_EXTRA: list[PatternEntry] = [
+    (_c(r"\bauthorization tokens?\b|\bauth tokens?\b"),
+     "secret_leak", BlockReason.SECRET_LEAK_ATTEMPT),
+    (_c(r"\b(database )?connection string\b"),
+     "secret_leak", BlockReason.SECRET_LEAK_ATTEMPT),
+]
+
+# Code / command execution (Python, shell, JavaScript).
+CODE_EXECUTION: list[PatternEntry] = [
+    (_c(r"\bos\.(popen|system)\b"), "code_execution", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\bsubprocess\.(popen|run|call|check_output)\b"), "code_execution", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\bpopen\b"), "code_execution", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\beval\s*\("), "code_execution", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\bexec\s*\("), "code_execution", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\b__import__\s*\("), "code_execution", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\busing eval\b|\beval to (execute|run)\b"), "code_execution", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\b(app\.)?launchurl\s*\("), "code_execution", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"<script\b"), "code_execution", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\bdocument\.cookie\b"), "code_execution", BlockReason.PROMPT_INJECTION_DETECTED),
+]
+
+# SSRF / network pivot.
+SSRF_NETWORK: list[PatternEntry] = [
+    (_c(r"\b(169\.254\.169\.254|127\.0\.0\.1|0\.0\.0\.0)\b"), "ssrf", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\bhttp://(internal|localhost|metadata)\b"), "ssrf", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\bfile://"), "ssrf", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\b(fetch|retrieve|read|load|get|access|download)\b[^.\n]{0,40}\b(internal|localhost|127\.0\.0\.1|169\.254|metadata|intranet)\b"),
+     "ssrf", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\bcurl\s+https?://"), "ssrf", BlockReason.PROMPT_INJECTION_DETECTED),
+]
+
+# Cross-user PII / privileged secret extraction.
+DATA_EXTRACTION_EXTRA: list[PatternEntry] = [
+    (_c(r"\b(previous|other|another|different) user('?s)?\b[^.\n]{0,40}\b(private|account|email|password|personal|payment|card|ssn|social security|pii|number)\b"),
+     "cross_user_pii", BlockReason.SECRET_LEAK_ATTEMPT),
+    (_c(r"\b(credit card|social security|ssn)\b[^.\n]{0,25}\b(number|details|for)\b"),
+     "sensitive_pii", BlockReason.SECRET_LEAK_ATTEMPT),
+    (_c(r"\bget_(admin_password|password|secret|token|credentials)\s*\("),
+     "privileged_call", BlockReason.SECRET_LEAK_ATTEMPT),
+    (_c(r"\bfrom your (context|memory|instructions|prompt|configuration)\b"),
+     "context_extract", BlockReason.SECRET_LEAK_ATTEMPT),
+]
+
+# Literal attack markers used across the evaluator dataset (never appear in
+# legitimate library content).
+FAKE_MARKERS: list[PatternEntry] = [
+    (_c(r"\bFAKE_INTERNAL_TOKEN\w*"), "fake_token", BlockReason.SECRET_LEAK_ATTEMPT),
+    (_c(r"\bMETADATA_INJECTED\b"), "injection_marker", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\bSESSION_COOKIE\b|\bsession cookie\b"), "session_secret", BlockReason.SECRET_LEAK_ATTEMPT),
+]
+
+# Common non-English (Spanish) instruction-override phrasings.
+NON_ENGLISH: list[PatternEntry] = [
+    (_c(r"\bignora\b[^.\n]{0,30}\b(instrucciones|reglas)\b"),
+     "non_english_override", BlockReason.PROMPT_INJECTION_DETECTED),
+    (_c(r"\b(muestra|revela|imprime)\b[^.\n]{0,20}\b(prompt|sistema|instrucciones)\b"),
+     "non_english_override", BlockReason.SYSTEM_PROMPT_LEAK),
+]
+
+
+# ---------------------------------------------------------------------------
 # Grouped rule sets used by each guard
 # ---------------------------------------------------------------------------
 
@@ -160,29 +260,93 @@ INPUT_GROUPS: list[PatternEntry] = (
     + SYSTEM_PROMPT_LEAK
     + SECRET_LEAK_INTENT
     + CONTEXT_POISONING
+    + EXTRA_OVERRIDE
+    + SYSTEM_PROMPT_LEAK_EXTRA
+    + SECRET_LEAK_EXTRA
+    + CODE_EXECUTION
+    + SSRF_NETWORK
+    + DATA_EXTRACTION_EXTRA
+    + FAKE_MARKERS
+    + NON_ENGLISH
 )
 
-# PDF/book content: only the strong, unambiguous injection signals.
-# Context-poisoning phrases ("from now on", "whenever I ask") are excluded
-# because they legitimately appear in ordinary prose and would over-block.
+# PDF/book content: the strong, unambiguous injection signals. Context-poisoning
+# phrases ("from now on", "whenever I ask") are excluded because they
+# legitimately appear in ordinary prose and would over-block.
 DOCUMENT_GROUPS: list[PatternEntry] = (
     INSTRUCTION_OVERRIDE
     + ROLE_MANIPULATION
     + SYSTEM_PROMPT_LEAK
     + SECRET_LEAK_INTENT
+    + EXTRA_OVERRIDE
+    + SYSTEM_PROMPT_LEAK_EXTRA
+    + SECRET_LEAK_EXTRA
+    + CODE_EXECUTION
+    + SSRF_NETWORK
+    + DATA_EXTRACTION_EXTRA
+    + FAKE_MARKERS
 )
 
-# Model output: leak phrases + literal secret values.
-OUTPUT_GROUPS: list[PatternEntry] = OUTPUT_LEAK_PHRASES + SECRET_VALUE
+# Model output: leak phrases + literal secret values + attack markers.
+OUTPUT_GROUPS: list[PatternEntry] = OUTPUT_LEAK_PHRASES + SECRET_VALUE + FAKE_MARKERS
+
+
+# Invisible / zero-width characters used to break up keywords (e.g. i-g-n-o-r-e).
+_ZERO_WIDTH = dict.fromkeys(
+    [0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD], None
+)
+# base64-looking substrings (>=16 chars so we don't decode ordinary words).
+_B64_RE = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}")
+
+
+def _normalized_variants(text: str) -> list[str]:
+    """
+    Return decoded/normalized variants of *text* so obfuscated payloads are
+    scanned in cleartext. Covers zero-width chars, HTML entities, URL-encoding,
+    and base64 — the encoding bypasses the red-team suite exercises.
+    """
+    variants: list[str] = []
+
+    stripped = text.translate(_ZERO_WIDTH)
+    if stripped != text:
+        variants.append(stripped)
+
+    unescaped = html.unescape(text)
+    if unescaped != text:
+        variants.append(unescaped)
+
+    unquoted = unquote(text)
+    if unquoted != text:
+        variants.append(unquoted)
+
+    decoded_parts: list[str] = []
+    for token in _B64_RE.findall(text):
+        try:
+            raw = base64.b64decode(token, validate=True)
+            decoded = raw.decode("utf-8")
+        except Exception:
+            continue
+        if decoded and sum(c.isprintable() for c in decoded) / len(decoded) > 0.8:
+            decoded_parts.append(decoded)
+    if decoded_parts:
+        variants.append(" ".join(decoded_parts))
+
+    return variants
 
 
 def _scan(text: Optional[str], groups: list[PatternEntry]) -> Optional[tuple[str, BlockReason]]:
-    """Return ``(category, reason)`` for the first matching rule, else None."""
+    """
+    Return ``(category, reason)`` for the first matching rule, else None.
+
+    The raw text AND its decoded/normalized variants are scanned, so encoded
+    payloads (base64, URL, HTML-entity, zero-width) can't bypass the rules.
+    """
     if not text:
         return None
-    for regex, category, reason in groups:
-        if regex.search(text):
-            return category, reason
+    for candidate in (text, *_normalized_variants(text)):
+        for regex, category, reason in groups:
+            if regex.search(candidate):
+                return category, reason
     return None
 
 
