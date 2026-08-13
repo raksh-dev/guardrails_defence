@@ -1,0 +1,34 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Virtual environments ----
+venv/
+.venv/
+env/
+
+# ---- Secrets / environment ----
+# Ignore real env files but keep the template tracked.
+.env
+.env.*
+!.env.example
+
+# ---- Logs ----
+*.log
+
+# ---- IDE / editor ----
+.idea/
+.vscode/
+
+# ---- OS junk ----
+.DS_Store
+Thumbs.db
+
+# ---- Project-specific ----
+# Local reference doc (already committed; ignore line keeps further local
+# copies out — remove this line if you want to version it like GUARDRAILS.md).
+CODEBASE_EXPLANATION.md
